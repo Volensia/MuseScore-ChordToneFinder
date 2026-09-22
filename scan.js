@@ -26,7 +26,8 @@ function indexHarmonies(score, env) {
             if (!a) continue;
             for (var i = 0; i < a.length; i++)
                 if (a[i].type === env.HARMONY)
-                    list.push({ tick: s.tick, staff: staffOfTrack(a[i].track), harmony: a[i], seg: s });
+                    list.push({ tick: s.tick, staff: staffOfTrack(a[i].track), harmony: a[i], seg: s,
+                                roman: a[i].harmonyType === 1 ? CT.romanInfo(a[i].text) : null });
         }
     return list;
 }
@@ -65,6 +66,60 @@ function staffDelta(score, staffIdx, tick, env) {
 function fifthsDelta(note) {
     var d = ((note.tpc2 - note.tpc1) % 12 + 12) % 12;   // spelling can wrap by 12 fifths
     return d > 6 ? d - 12 : d;
+}
+
+// ---------------------------------------------------------------- keys (Roman numerals)
+// The plugin API gives the key signature (cursor.keySignature, in fifths) but not the
+// mode, so the panel asks: "Minor key" checkbox -> setRomanMinor(). The tonic is the key
+// signature's major key, or its relative minor when the box is ticked. A key label written
+// in a numeral ("a: i", "C: V7") overrides both until the next label or key-signature change.
+
+var romanMinor = false;
+function setRomanMinor(b) { romanMinor = !!b; }
+
+// ticks where this staff has a key signature of its own (not the ones repeated per system)
+function keyChanges(score, env, staffIdx) {
+    var out = [0];
+    for (var m = score.firstMeasure; m; m = m.nextMeasure)
+        for (var s = m.firstSegment; s; s = s.nextInMeasure) {
+            var e = s.elementAt(staffIdx * 4);
+            if (e && e.type === env.KEYSIG && !e.generated && s.tick > 0 && out.indexOf(s.tick) < 0) out.push(s.tick);
+        }
+    return out.sort(function (a, b) { return a - b; });
+}
+
+// -> { tonicTpc, minor, how: "label" | "setting" }
+function keyAt(score, env, index, tick, staffIdx, cache) {
+    var ch = cache && cache[staffIdx] ? cache[staffIdx] : keyChanges(score, env, staffIdx);
+    if (cache) cache[staffIdx] = ch;
+    var from = 0, i;
+    for (i = 0; i < ch.length && ch[i] <= tick; i++) from = ch[i];
+    for (i = index.length - 1; i >= 0; i--) {
+        var e = index[i];
+        if (e.tick > tick || !e.roman || !e.roman.label) continue;
+        if (e.tick >= from) return { tonicTpc: e.roman.label.tonicTpc, minor: e.roman.label.minor, how: "label" };
+        break;
+    }
+    var c = score.newCursor();
+    c.staffIdx = staffIdx; c.voice = 0;
+    c.rewindToTick(tick);
+    return { tonicTpc: (romanMinor ? 17 : 14) + c.keySignature, minor: romanMinor, how: "setting" };
+}
+
+// A chord symbol (index entry) -> parsed chord; Roman numerals are resolved in the key
+// in effect. Adds .display (the symbol as shown) and .resolvedText (Roman only).
+function symbolChord(score, env, index, h, cache) {
+    var text = String(h.harmony.text), chord;
+    if (h.harmony.harmonyType === 1) {
+        var k = keyAt(score, env, index, h.tick, h.staff, cache);
+        chord = CT.parseRoman(text, k.tonicTpc, k.minor);
+        chord.display = CT.romanPretty(text);
+        if (chord.ok) chord.resolvedText = "= " + chord.resolved + " in " + chord.key;
+    } else {
+        chord = CT.parseChord(text);
+        chord.display = pretty(text);
+    }
+    return chord;
 }
 
 function barOf(score, tick) {
@@ -171,7 +226,7 @@ function analyse(score, env) {
         if (!it.seg) continue;
 
         if (it.harmony) {                       // clicked the symbol itself
-            var g0 = groupFor(score, groups, byKey, it.harmony, it.seg, it.seg);
+            var g0 = groupFor(score, env, index, groups, byKey, it.harmony, it.seg, it.seg);
             var hs = staffOfTrack(it.harmony.track);
             notesStartingAt(score, it.seg, env).forEach(function (n) {
                 addNote(g0, n, harmonySpaceTpc(n, hs));
@@ -188,18 +243,18 @@ function analyse(score, env) {
             if (it.note) g1.notes.push({ name: CT.tpcName(it.note.tpc), label: "", detail: "", status: "none" });
             continue;
         }
-        var g = groupFor(score, groups, byKey, found.harmony, found.seg, it.seg);
+        var g = groupFor(score, env, index, groups, byKey, found.harmony, found.seg, it.seg);
         if (it.note) addNote(g, it.note, harmonySpaceTpc(it.note, found.staff));
     }
     return { message: groups.length ? "" : (skipped ? "Percussion notes have no pitch to analyse." : ""),
              groups: groups };
 }
 
-function groupFor(score, groups, byKey, harmony, hSeg, noteSeg) {
+function groupFor(score, env, index, groups, byKey, harmony, hSeg, noteSeg) {
     var key = hSeg.tick + "|" + harmony.track + "|" + harmony.text;
     var g = byKey[key];
     if (g) return g;
-    var chord = CT.parseChord(harmony.text);
+    var chord = symbolChord(score, env, index, { tick: hSeg.tick, staff: staffOfTrack(harmony.track), harmony: harmony });
     var bar = barOf(score, hSeg.tick);
     g = byKey[key] = {
         key: key, text: String(harmony.text), chord: chord, notes: [],
@@ -366,7 +421,7 @@ function noteName(tpc, pitch) {
 function voicingAt(score, env, span, index, tick) {
     var concert = !!score.style.value("concertPitch");
     var h = harmonyFor(index, tick, span.staves[0]);
-    var chord = h ? CT.parseChord(h.harmony.text) : null;
+    var chord = h ? symbolChord(score, env, index, h, {}) : null;
     var roles = chord && chord.ok;
     var deltas = {};
     function space(note) {                              // see harmonySpaceTpc in analyse()
@@ -430,6 +485,9 @@ function voicingAt(score, env, span, index, tick) {
         tick: tick,
         where: "bar " + barOf(score, tick) + (tick > ms ? ", beat " + (Math.floor((tick - ms) / 480) + 1) : ""),
         chordText: h ? String(h.harmony.text) : "",
+        display: chord ? chord.display : "",
+        resolved: chord && chord.resolvedText ? chord.resolvedText : "",
+        roman: !!(chord && chord.roman),
         noSymbol: !h || !chord || chord.noChord,
         unreadable: !!(h && chord && !chord.ok && !chord.noChord),
         pitches: pitches, counts: counts,

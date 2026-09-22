@@ -14,6 +14,7 @@
 import QtQuick 2.2
 import QtQuick.Controls 1.1
 import MuseScore 3.0
+import Qt.labs.settings 1.0
 import "scan.js" as SC
 
 MuseScore {
@@ -28,7 +29,7 @@ MuseScore {
     height: 150
 
     property var env: ({ NOTE: Element.NOTE, CHORD: Element.CHORD, REST: Element.REST,
-                         HARMONY: Element.HARMONY, SEGMENT: Element.SEGMENT,
+                         HARMONY: Element.HARMONY, SEGMENT: Element.SEGMENT, KEYSIG: Element.KEYSIG,
                          SELECTION_START: Cursor.SELECTION_START, SELECTION_END: Cursor.SELECTION_END })
     property var v: null                 // SC.voicing(): span + step ticks
     property var cur: null               // SC.voicingAt() for the step shown
@@ -41,6 +42,11 @@ MuseScore {
     property bool selChanged: true
 
     SystemPalette { id: pal; colorGroup: SystemPalette.Active }
+
+    // Roman numerals need to know major or minor; the plugin API doesn't say, so ask.
+    property bool romanMinor: false
+    Settings { category: "ChordToneFinder"; property alias romanMinor: root.romanMinor }
+    onRomanMinorChanged: { SC.setRomanMinor(romanMinor); refresh(); }
 
     // Role colours: Okabe–Ito, distinct for most colour-vision types.
     function roleColor(deg, status) {
@@ -56,6 +62,7 @@ MuseScore {
     // ---------------------------------------------------------------- data
     function refresh() {
         try {
+            SC.setRomanMinor(romanMinor);
             v = SC.voicing(curScore, env);
             if (selChanged || !v.steps.length || stepIdx >= v.steps.length) { stepIdx = 0; hlDeg = -99; }
             selChanged = false;
@@ -162,10 +169,16 @@ MuseScore {
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: !cur ? "" : cur.noSymbol ? (cur.unreadable ? "\"" + cur.chordText + "\"?" : "No chord symbol")
-                                                   : SC.pretty(cur.chordText)
+                                                   : cur.display
                     color: pal.windowText
                     font.pixelSize: cur && cur.noSymbol ? 13 : 18
                     font.bold: true
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: text !== ""
+                    text: cur ? cur.resolved : ""
+                    color: pal.windowText; opacity: 0.8; font.pixelSize: 12
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
@@ -224,14 +237,23 @@ MuseScore {
                 anchors.right: parent.right
                 anchors.verticalCenter: header.verticalCenter
                 spacing: 6
-                visible: !!v && v.steps.length > 1
-                Button { text: "◀"; width: 26; height: 20; onClicked: step(-1) }
+                visible: (!!v && v.steps.length > 1) || (!!cur && cur.roman)
+                CheckBox {
+                    id: minorBox
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: !!cur && cur.roman
+                    text: "Minor key"
+                    checked: romanMinor
+                    onClicked: romanMinor = checked
+                }
+                Button { text: "◀"; width: 26; height: 20; visible: !!v && v.steps.length > 1; onClicked: step(-1) }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
+                    visible: !!v && v.steps.length > 1
                     text: v ? (stepIdx + 1) + " / " + v.steps.length : ""
                     color: pal.windowText; font.pixelSize: 11
                 }
-                Button { text: "▶"; width: 26; height: 20; onClicked: step(1) }
+                Button { text: "▶"; width: 26; height: 20; visible: !!v && v.steps.length > 1; onClicked: step(1) }
             }
 
             // pitch strip + labels

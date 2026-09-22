@@ -276,3 +276,152 @@ function describe(chord) {
            (chord.bassTpc !== null ? " /" + tpcName(chord.bassTpc) : "") +
            (chord.unparsed ? " ?" + chord.unparsed : "");
 }
+
+// ================================================================ Roman numerals
+// MuseScore's Roman-numeral chord symbols (harmonyType 1) are plain text such as
+// "V65/V", "viio7", "bVI", "N6", optionally with a key label "a: i". A numeral only
+// means something in a key, so the caller passes the key: tonicTpc + minor.
+//
+// Conventions (common textbook usage):
+//  - case and marks give the triad: I major, i minor, ° / o diminished, ø half-
+//    diminished, + augmented;
+//  - a seventh is diatonic to the key unless marked: °7 diminished, ø7 minor,
+//    M7 / maj7 major;
+//  - figures give the inversion: 6 / 63, 64; 7, 65, 43, 42 / 2; 9 adds a diatonic ninth;
+//  - in minor, lowercase vi / vii sit on the raised 6th / 7th, uppercase VI / VII on
+//    the natural ones; a written accidental (bVI, #iv) counts from the major scale;
+//  - X/Y is X in the key of Y (major if Y is uppercase, minor if lowercase);
+//  - N / N6 is the Neapolitan: major triad on the lowered 2nd.
+
+var NUMERALS = ["VII", "III", "IV", "VI", "II", "V", "I"];      // longest first
+var DEGREE = { I: 0, II: 1, III: 2, IV: 3, V: 4, VI: 5, VII: 6 };
+var MAJOR_TPC = [0, 2, 4, -1, 1, 3, 5];           // scale degrees on the line of fifths
+var MINOR_TPC = [0, 2, -3, -1, 1, -4, -2];        // natural minor
+
+function romanNormalise(s) {
+    return String(s).replace(/♭/g, "b").replace(/♯/g, "#").replace(/[°º˚]/g, "o")
+                    .replace(/[øØ]/g, "0").replace(/\s+/g, "");
+}
+
+// "a: i" -> { tonicTpc, minor, rest } ; no label -> null
+function romanKeyLabel(text) {
+    var m = /^([A-Ga-g])(bb|##|b|#)?:(.*)$/.exec(romanNormalise(text));
+    if (!m) return null;
+    return { tonicTpc: letterTpc(m[1].toUpperCase(), alterOf(m[2])), minor: m[1] === m[1].toLowerCase(), rest: m[3] };
+}
+
+function keyName(tonicTpc, minor) { return tpcName(tonicTpc) + (minor ? " minor" : " major"); }
+
+// One numeral with its marks and figures, e.g. "bVIIM7", "viio65".
+// -> { acc, degree, upper, quality, seventh, ninth, inversion, neapolitan } or null
+function parseNumeral(s) {
+    var m = /^(b|#)?(N|[IViv]+)(o|0|\+|dim|aug)?(M7|maj7|M)?([0-9]*)(o|0|\+)?(M7|maj7)?$/.exec(s);
+    if (!m) return null;
+    var r = { acc: alterOf(m[1]), neapolitan: m[2] === "N", upper: true, degree: 0, quality: "", seventh: "", ninth: false, inversion: 0 };
+    if (!r.neapolitan) {
+        var up = m[2].toUpperCase();
+        if (!(up in DEGREE) || (m[2] !== up && m[2] !== m[2].toLowerCase())) return null;   // mixed case
+        r.degree = DEGREE[up];
+        r.upper = m[2] === up;
+    } else { r.acc = -1; r.degree = 1; }
+    var q = m[3] || m[6] || "";
+    r.quality = q === "o" || q === "dim" ? "dim" : q === "0" ? "hdim" : q === "+" || q === "aug" ? "aug" : "";
+    var maj = !!(m[4] || m[7]);
+    var fig = m[5];
+    var figs = { "": [0, false], "5": [0, false], "53": [0, false], "6": [1, false], "63": [1, false], "64": [2, false],
+                 "7": [0, true], "753": [0, true], "65": [1, true], "653": [1, true], "43": [2, true], "643": [2, true],
+                 "42": [3, true], "642": [3, true], "2": [3, true], "9": [0, true] };
+    if (!(fig in figs)) return null;
+    r.inversion = figs[fig][0];
+    var hasSeventh = figs[fig][1] || maj || r.quality === "hdim";
+    r.ninth = fig === "9";
+    r.seventh = !hasSeventh ? "" : maj ? "major" : r.quality === "dim" ? "dim" : r.quality === "hdim" ? "minor" : "diatonic";
+    return r;
+}
+
+// root tpc of numeral n in key (tonicTpc, minor)
+function numeralRoot(n, tonicTpc, minor) {
+    if (n.acc !== 0 || n.neapolitan || !minor) return tonicTpc + MAJOR_TPC[n.degree] + 7 * n.acc;
+    var t = tonicTpc + MINOR_TPC[n.degree];
+    if (!n.upper && (n.degree === 5 || n.degree === 6)) t += 7;       // vi, vii on the raised degrees
+    return t;
+}
+
+// the diatonic scale tpc for a letter step above the local tonic
+function scaleTpc(tonicTpc, minor, step) { return tonicTpc + (minor ? MINOR_TPC : MAJOR_TPC)[step % 7]; }
+
+// Build the chord for a numeral (no key label, no secondary) in a key.
+function numeralChord(n, tonicTpc, minor) {
+    var root = numeralRoot(n, tonicTpc, minor);
+    var upper = n.neapolitan ? true : n.upper;
+    var mem = [{ deg: 1, alt: 0 }];
+    mem.push({ deg: 3, alt: upper && n.quality !== "dim" && n.quality !== "hdim" ? 0 : -1 });
+    mem.push({ deg: 5, alt: n.quality === "dim" || n.quality === "hdim" ? -1 : n.quality === "aug" ? 1 : 0 });
+    // the letter step of the root above the tonic, for diatonic 7ths / 9ths
+    var rootStep = ((LETTERS.indexOf(tpcLetter(root)) - LETTERS.indexOf(tpcLetter(tonicTpc))) % 7 + 7) % 7;
+    function diatonicAlt(stepsAboveRoot) {
+        var t = scaleTpc(tonicTpc, minor, rootStep + stepsAboveRoot);
+        return Math.round((t - root - STEP_TPC[stepsAboveRoot]) / 7);
+    }
+    if (n.seventh) {
+        var a7 = n.seventh === "major" ? 0 : n.seventh === "minor" ? -1 : n.seventh === "dim" ? -2 : diatonicAlt(6);
+        mem.push({ deg: 7, alt: a7 });
+    }
+    if (n.ninth) mem.push({ deg: 9, alt: diatonicAlt(1) });
+    var members = mem.map(function (x) { return decorate(root, x); });
+    var bassMember = [0, 1, 2, 3][n.inversion];
+    var bass = n.inversion > 0 && members[bassMember] ? members[bassMember].tpc : null;
+    return { rootTpc: root, bassTpc: bass, members: members };
+}
+
+// Text of a Roman-numeral symbol -> chord (same shape as parseChord), given the key
+// in effect. A key label inside the text ("a: i") overrides that key.
+function parseRoman(text, tonicTpc, minor) {
+    var raw = String(text), out = { text: raw, ok: false, rootTpc: null, bassTpc: null, members: [],
+                                    unparsed: "", noChord: false, roman: true, key: "", resolved: "" };
+    var s = romanNormalise(raw);
+    if (/^(N\.?C\.?|NC)$/i.test(s) || s === "") { out.noChord = true; return out; }
+    var lab = romanKeyLabel(raw);
+    if (lab) { tonicTpc = lab.tonicTpc; minor = lab.minor; s = lab.rest; }
+    var parts = s.split("/");
+    var nums = parts.map(parseNumeral);
+    if (nums.some(function (n) { return !n; })) { out.unparsed = raw; return out; }
+    // resolve secondaries from the right: X/Y/Z = X in the key of (Y in the key of Z)
+    var t = tonicTpc, mi = minor;
+    for (var i = nums.length - 1; i >= 1; i--) {
+        var target = nums[i];
+        t = numeralRoot(target, t, mi);
+        mi = !target.upper && !target.neapolitan;
+    }
+    var c = numeralChord(nums[0], t, mi);
+    out.rootTpc = c.rootTpc; out.bassTpc = c.bassTpc; out.members = c.members;
+    out.key = keyName(tonicTpc, minor);
+    out.resolved = chordName(out);
+    out.ok = true;
+    return out;
+}
+
+// What a built chord would be called as a chord symbol: "D7/F♯", "Bdim7", "Fm".
+function chordName(chord) {
+    var by = {};
+    chord.members.forEach(function (m) { by[m.deg] = m.alt; });
+    var t = by[3], f = by[5], s = by[7], q;
+    if (s === undefined) q = t === 0 ? (f === 1 ? "+" : "") : (f === -1 ? "dim" : "m");
+    else if (t === 0) q = f === 1 ? "+7" : s === 0 ? "maj7" : "7";
+    else if (f === -1) q = s === -2 ? "dim7" : "m7♭5";
+    else q = s === 0 ? "m(maj7)" : "m7";
+    if (by[9] !== undefined) q = q.replace("7", "9") + (by[9] !== 0 ? "(" + accidental(by[9]) + "9)" : "");
+    return tpcName(chord.rootTpc) + q + (chord.bassTpc !== null && chord.bassTpc !== chord.rootTpc ? "/" + tpcName(chord.bassTpc) : "");
+}
+
+// A Roman symbol's key label, if it has one: -> { label: {tonicTpc, minor} | null }
+function romanInfo(text) {
+    var lab = romanKeyLabel(text);
+    return { label: lab ? { tonicTpc: lab.tonicTpc, minor: lab.minor } : null };
+}
+
+// Pretty form for display: "bVII" -> "♭VII", "viio7" -> "vii°7", "iiø7" kept.
+function romanPretty(text) {
+    return String(text).replace(/(^|[:/\s])b(?=[IViv])/g, "$1♭").replace(/(^|[:/\s])#(?=[IViv])/g, "$1♯")
+                       .replace(/([IViv])o/g, "$1°").replace(/([IViv])0/g, "$1ø");
+}
