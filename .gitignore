@@ -1,0 +1,6 @@
+# Generated plugin file — build it with `python3 bundle.py`.
+dist/
+
+# Python bytecode
+__pycache__/
+*.pyc
