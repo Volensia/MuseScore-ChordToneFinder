@@ -70,9 +70,10 @@ function fifthsDelta(note) {
 
 // ---------------------------------------------------------------- keys (Roman numerals)
 // The plugin API gives the key signature (cursor.keySignature, in fifths) but not the
-// mode, so the panel asks: "Minor key" checkbox -> setRomanMinor(). The tonic is the key
-// signature's major key, or its relative minor when the box is ticked. A key label written
-// in a numeral ("a: i", "C: V7") overrides both until the next label or key-signature change.
+// mode, so the panel asks: "Minor key" checkbox -> setRomanMinor(); major/minor is never
+// inferred. The tonic is the key signature's major key, or its relative minor when the box
+// is ticked. A key label in a numeral ("a: i", "C: V7") moves the tonic (not the mode) until
+// the next label or key-signature change.
 
 var romanMinor = false;
 function setRomanMinor(b) { romanMinor = !!b; }
@@ -97,7 +98,7 @@ function keyAt(score, env, index, tick, staffIdx, cache) {
     for (i = index.length - 1; i >= 0; i--) {
         var e = index[i];
         if (e.tick > tick || !e.roman || !e.roman.label) continue;
-        if (e.tick >= from) return { tonicTpc: e.roman.label.tonicTpc, minor: e.roman.label.minor, how: "label" };
+        if (e.tick >= from) return { tonicTpc: e.roman.label.tonicTpc, minor: romanMinor, how: "label" };
         break;
     }
     var c = score.newCursor();
@@ -114,10 +115,15 @@ function symbolChord(score, env, index, h, cache) {
         var k = keyAt(score, env, index, h.tick, h.staff, cache);
         chord = CT.parseRoman(text, k.tonicTpc, k.minor);
         chord.display = CT.romanPretty(text);
-        if (chord.ok) chord.resolvedText = "= " + chord.resolved + " in " + chord.key;
+        if (chord.ok) chord.resolvedText = "= " + chord.resolved;
     } else {
         chord = CT.parseChord(text);
         chord.display = pretty(text);
+        if (chord.ok) {                         // the same chord as a Roman numeral, in the key in effect
+            var k2 = keyAt(score, env, index, h.tick, h.staff, cache);
+            var rn = CT.romanFor(chord, k2.tonicTpc, k2.minor);
+            if (rn) chord.resolvedText = "= " + CT.romanPretty(rn);
+        }
     }
     return chord;
 }
@@ -387,26 +393,29 @@ function instrumentName(score, staffIdx, tick) {
     return "Staff " + (staffIdx + 1);
 }
 
-// notes sounding at `tick` on the given staves: [{ note, staff }]
-function soundingAt(score, env, staves, tick) {
-    var out = [], ms = measureStart(score, tick);
+// Notes heard in [t0, t1) on the given staves: anything still sounding at t0 plus
+// everything attacked before t1. -> [{ note, staff }], each staff/pitch once.
+function soundingIn(score, env, staves, t0, t1) {
+    var out = [], seen = {}, ms = measureStart(score, t0);
     staves.forEach(function (st) {
         for (var v = 0; v < 4; v++) {
             var c = score.newCursor();
             c.track = st * 4 + v;
             c.rewindToTick(ms);
-            var hit = null;
-            while (c.segment && c.tick <= tick) {
+            while (c.segment && c.tick < t1) {
                 var el = c.element;
-                if (el && el.track === st * 4 + v && (el.type === env.CHORD || el.type === env.REST)) {
+                if (el && el.track === st * 4 + v && el.type === env.CHORD) {
                     var d = el.actualDuration ? el.actualDuration.ticks : 0;
-                    hit = (c.tick + d > tick) ? el : null;
+                    if (c.tick + d > t0) {
+                        for (var k = 0; k < el.notes.length; k++) {
+                            var n = el.notes[k], key = st + "|" + n.pitch + "|" + n.tpc1;
+                            if (isDrum(n) || seen[key]) continue;
+                            seen[key] = true;
+                            out.push({ note: n, staff: st });
+                        }
+                    }
                 }
                 c.next();
-            }
-            if (hit && hit.type === env.CHORD) {
-                for (var k = 0; k < hit.notes.length; k++)
-                    if (!isDrum(hit.notes[k])) out.push({ note: hit.notes[k], staff: st });
             }
         }
     });
@@ -417,8 +426,10 @@ function noteName(tpc, pitch) {
     return CT.tpcName(tpc) + (Math.floor((pitch - CT.tpcAlter(tpc)) / 12) - 1);
 }
 
-// The voicing at one step.
+// The voicing for one step: from `tick` to the next chord symbol or the end of the selection.
 function voicingAt(score, env, span, index, tick) {
+    var end = span.t1;
+    index.forEach(function (e) { if (e.tick > tick && e.tick < end) end = e.tick; });
     var concert = !!score.style.value("concertPitch");
     var h = harmonyFor(index, tick, span.staves[0]);
     var chord = h ? symbolChord(score, env, index, h, {}) : null;
@@ -432,7 +443,7 @@ function voicingAt(score, env, span, index, tick) {
     }
 
     var names = {};
-    var raw = soundingAt(score, env, span.staves, tick).map(function (x) {
+    var raw = soundingIn(score, env, span.staves, tick, end).map(function (x) {
         if (!(x.staff in names)) names[x.staff] = instrumentName(score, x.staff, tick);
         var n = x.note, r = roles ? CT.analyseNote(chord, space(n)) : null;
         var mem = r && r.member >= 0 ? chord.members[r.member] : null;
@@ -448,7 +459,7 @@ function voicingAt(score, env, span, index, tick) {
         var k = x.pitch + "|" + x.name;
         if (!byPitch[k]) { byPitch[k] = { pitch: x.pitch, name: x.name, role: x.role, deg: x.deg, status: x.status,
                                           label: x.label, who: [] }; pitches.push(byPitch[k]); }
-        byPitch[k].who.push(x.who);
+        if (byPitch[k].who.indexOf(x.who) < 0) byPitch[k].who.push(x.who);
     });
     pitches.sort(function (a, b) { return a.pitch - b.pitch; });
 
@@ -487,7 +498,7 @@ function voicingAt(score, env, span, index, tick) {
         chordText: h ? String(h.harmony.text) : "",
         display: chord ? chord.display : "",
         resolved: chord && chord.resolvedText ? chord.resolvedText : "",
-        roman: !!(chord && chord.roman),
+        roman: !!(chord && (chord.roman || chord.ok)),     // shows the Minor key box
         noSymbol: !h || !chord || chord.noChord,
         unreadable: !!(h && chord && !chord.ok && !chord.noChord),
         pitches: pitches, counts: counts,

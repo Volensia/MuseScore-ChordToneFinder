@@ -197,7 +197,7 @@ function degreeLabel(deg, alt) {
 function shortLabel(deg, alt) {
     if (deg === 1) return "R";
     if (deg === 7) return alt === 0 ? "△7" : alt === -2 ? "°7" : "7";
-    if (deg === 3) return alt === -1 ? "♭3" : "3";
+    if (deg === 3) return "3";              // the chord's quality is in its symbol; this names the member
     return accidental(alt) + deg;
 }
 
@@ -292,6 +292,8 @@ function describe(chord) {
 //    the natural ones; a written accidental (bVI, #iv) counts from the major scale;
 //  - X/Y is X in the key of Y (major if Y is uppercase, minor if lowercase);
 //  - N / N6 is the Neapolitan: major triad on the lowered 2nd.
+//  - major or minor always comes from the caller (the panel's checkbox); a key label
+//    in the text ("a: i") only moves the tonic.
 
 var NUMERALS = ["VII", "III", "IV", "VI", "II", "V", "I"];      // longest first
 var DEGREE = { I: 0, II: 1, III: 2, IV: 3, V: 4, VI: 5, VII: 6 };
@@ -381,8 +383,8 @@ function parseRoman(text, tonicTpc, minor) {
                                     unparsed: "", noChord: false, roman: true, key: "", resolved: "" };
     var s = romanNormalise(raw);
     if (/^(N\.?C\.?|NC)$/i.test(s) || s === "") { out.noChord = true; return out; }
-    var lab = romanKeyLabel(raw);
-    if (lab) { tonicTpc = lab.tonicTpc; minor = lab.minor; s = lab.rest; }
+    var lab = romanKeyLabel(raw);                  // "a: i": moves the tonic; major/minor stays the caller's
+    if (lab) { tonicTpc = lab.tonicTpc; s = lab.rest; }
     var parts = s.split("/");
     var nums = parts.map(parseNumeral);
     if (nums.some(function (n) { return !n; })) { out.unparsed = raw; return out; }
@@ -424,4 +426,79 @@ function romanInfo(text) {
 function romanPretty(text) {
     return String(text).replace(/(^|[:/\s])b(?=[IViv])/g, "$1♭").replace(/(^|[:/\s])#(?=[IViv])/g, "$1♯")
                        .replace(/([IViv])o/g, "$1°").replace(/([IViv])0/g, "$1ø");
+}
+
+// ================================================================ letter -> Roman
+// The Roman numeral for a letter-name chord in a key, or "" when there is no standard
+// one (6th chords, sus, add9, slash basses that aren't chord members…). Candidates are
+// tried in textbook order and each is read back with parseRoman(); the first whose
+// notes and bass match exactly wins, so a numeral shown is never wrong.
+var ROMAN_UP = ["I", "II", "III", "IV", "V", "VI", "VII"];
+var DIATONIC_TARGETS = {
+    major: ["ii", "iii", "IV", "V", "vi"],
+    minor: ["III", "iv", "V", "VI", "VII"]
+};
+
+function romanFor(chord, tonicTpc, minor) {
+    if (!chord || !chord.ok || chord.roman) return "";
+    var degs = chord.members.map(function (m) { return m.deg; });
+    var allowed = degs.every(function (d) { return d === 1 || d === 3 || d === 5 || d === 7 || d === 9; });
+    if (!allowed || degs.indexOf(3) < 0 || degs.indexOf(5) < 0) return "";
+    var hasSeventh = degs.indexOf(7) >= 0, hasNinth = degs.indexOf(9) >= 0;
+    if (hasNinth && !hasSeventh) return "";
+
+    var inv = 0;
+    if (chord.bassTpc !== null && chord.bassTpc !== chord.rootTpc) {
+        var bi = -1;
+        chord.members.forEach(function (m, i) { if (m.tpc === chord.bassTpc) bi = i; });
+        if (bi < 0) return "";
+        inv = [0, 1, 2, 3][[1, 3, 5, 7].indexOf(chord.members[bi].deg)];
+        if (inv === undefined || inv < 0) return "";
+    }
+    if (hasNinth && inv) return "";
+    var figs = hasNinth ? ["9"] : hasSeventh ? [["7", "65", "43", "42"][inv], "M" + ["7", "65", "43", "42"][inv]]
+                                             : [["", "6", "64"][inv]];
+    if (figs[0] === undefined) return "";
+
+    var want = chord.members.map(function (m) { return m.tpc; }).sort(function (a, b) { return a - b; }).join(",");
+    var wantBass = inv ? chord.bassTpc : null;
+    function matches(txt) {
+        var c = parseRoman(txt, tonicTpc, minor);
+        if (!c.ok) return false;
+        var got = c.members.map(function (m) { return m.tpc; }).sort(function (a, b) { return a - b; }).join(",");
+        return got === want && (c.bassTpc === null ? null : c.bassTpc) === wantBass;
+    }
+
+    var d = ((LETTERS.indexOf(tpcLetter(chord.rootTpc)) - LETTERS.indexOf(tpcLetter(tonicTpc))) % 7 + 7) % 7;
+    var acc = Math.round((chord.rootTpc - tonicTpc - MAJOR_TPC[d]) / 7);
+    var accStr = acc < 0 ? new Array(-acc + 1).join("b") : new Array(acc + 1).join("#");
+    var up = ROMAN_UP[d], lo = up.toLowerCase();
+    // every case/mark spelling of this degree, conventional ones only (° ø lowercase, + uppercase)
+    var spellings = [up, lo, lo + "o", lo + "ø", up + "+"];
+    var i, j, k, t;
+    function tryAll(prefix, list, suffix) {
+        for (var a1 = 0; a1 < list.length; a1++) for (var b1 = 0; b1 < figs.length; b1++)
+            if (matches(t = prefix + list[a1] + figs[b1] + (suffix || ""))) return t;
+        return "";
+    }
+
+    // 1. the key's own chord on this degree
+    var diatonic = (minor ? ["i", "iio", "III", "iv", "V", "VI", "viio"] : ["I", "ii", "iii", "IV", "V", "vi", "viio"])[d];
+    var dia = [diatonic];
+    if (/o$/.test(diatonic)) dia.push(diatonic.replace(/o$/, "ø"));     // vii°7 / viiø7
+    if (minor && d === 6) dia.push("VII");                                // natural minor's subtonic
+    if (minor && d === 4) dia.push("v");                                  // natural minor's minor v
+    if ((t = tryAll("", dia))) return t;
+    // 2. the tonic borrowed from the other mode (I in minor, i in major)
+    if (d === 0 && (t = tryAll("", spellings))) return t;
+    // 3. Neapolitan
+    if (!hasSeventh && (t = tryAll("", ["N"]))) return t;
+    // 4. secondary dominant / leading-tone chords
+    var targets = DIATONIC_TARGETS[minor ? "minor" : "major"];
+    var primaries = hasSeventh ? ["V", "viio", "viiø"] : ["V", "viio"];
+    for (i = 0; i < targets.length; i++) if ((t = tryAll("", primaries, "/" + targets[i]))) return t;
+    // 5. other chords on this degree (mixture: iv in major, III+…), then with an accidental
+    if ((t = tryAll("", spellings))) return t;
+    if (accStr && (t = tryAll(accStr, spellings))) return t;
+    return "";
 }

@@ -1,7 +1,7 @@
 //=============================================================================
 //  Chord Tone Finder — voicing view
 //  Select notes, or a range across several staves. The panel at the bottom shows
-//  the chord at the start of the selection: every sounding note on a pitch strip,
+//  each chord in the selection: every note heard under it on a pitch strip,
 //  who plays it, its role in the chord symbol, unison/octave doublings and how
 //  many players are on each chord member. ◀ ▶ steps through the chord symbols
 //  inside the selection.
@@ -92,8 +92,10 @@ MuseScore {
     function layoutStrip() {
         if (!cur || !cur.pitches.length) { labels = []; cells = []; return; }
         var ps = cur.pitches, W = strip.width, pad = 26, gap = 50;
-        var lo = Math.floor(ps[0].pitch / 12) * 12, hi = Math.ceil((ps[ps.length - 1].pitch + 1) / 12) * 12;
-        while (hi - lo < 24) { lo -= 6; hi += 6; }
+        // always the piano's range, A0–C8; wider only for notes outside it
+        var lo = 21, hi = 109;
+        if (ps[0].pitch < lo) lo = Math.floor(ps[0].pitch / 12) * 12;
+        if (ps[ps.length - 1].pitch >= hi) hi = Math.ceil((ps[ps.length - 1].pitch + 1) / 12) * 12;
         var span = hi - lo, cw = (W - 2 * pad) / span;
         function kx(p) { return pad + (p - lo + 0.5) * cw; }
 
